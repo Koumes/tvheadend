@@ -38,7 +38,7 @@ typedef int (*api_callback_t)
 typedef struct api_hook
 {
   const char         *ah_subsystem;
-  int                 ah_access;
+  uint32_t            ah_access;
   api_callback_t      ah_callback;
   void               *ah_opaque;
 } api_hook_t;
@@ -67,6 +67,7 @@ void api_input_init         ( void );
 void api_service_init       ( void );
 void api_channel_init       ( void );
 void api_bouquet_init       ( void );
+void api_ratinglabel_init   ( void );
 void api_mpegts_init        ( void );
 void api_epg_init           ( void );
 void api_epggrab_init       ( void );

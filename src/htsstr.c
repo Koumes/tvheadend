@@ -133,6 +133,7 @@ htsstr_argsplit_add
 char **
 htsstr_argsplit(const char *str) {
   int quote = 0;
+  int quote_inbetween = 0; // when quote isn't start of argument
   int inarg = 0;
   const char *start = NULL;
   const char *s;
@@ -147,17 +148,19 @@ htsstr_argsplit(const char *str) {
           break;
         case '"':
           if(quote) {
-            inarg = 0;
             quote = 0;
             if (start) {
               htsstr_argsplit_add(&argv, &argc, start, s);
               start = NULL;
             }
-            s++;
+          } else if (quote_inbetween) {
+            quote_inbetween = 0;
+          } else {
+            quote_inbetween = 1;
           }
           break;
         case ' ':
-          if(quote)
+          if(quote||quote_inbetween)
             break;
           inarg = 0;
           if (start) {
@@ -286,3 +289,31 @@ htsstr_substitute(const char *src, char *dst, size_t dstlen,
     *dst = '\0';
   return res;
 }
+
+#if 0
+/*
+ * gcc -g -I ../build.linux/ -o test htsstr.c
+ */
+void main(int argc, char *argv[])
+{
+  char *strings[] = {
+    "sh -c '/bin/df -P -h /recordings >/config/.markers/recording-pre-process'",
+    "sh -c \"/bin/df -P -h /recordings >/config/.markers/recording-pre-process\"",
+    "bash -c '/bin/df -P -h /recordings >/config/.markers/recording-pre-process'",
+    "bash -c \"/bin/df -P -h /recordings | tee /config/.markers/recording-pre-process\"",
+    "/bin/grep --label=\"TVHeadend Recording\" \"start time\"",
+    "/bin/grep --label=\"TVHeadend Recordings \"File \"start time\" /recordings",
+    NULL,
+  };
+  char **s = strings, **x;
+  while (*s) {
+    printf("Test for >>>%s<<<\n", *s);
+    x = htsstr_argsplit(*s);
+    while (*x) {
+      printf("  >%s<\n", *x);
+      x++;
+    }
+    s++;
+  }
+}
+#endif

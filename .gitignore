@@ -33,6 +33,7 @@ nbproject
 *.orig
 *.patch
 
+debian/.debhelper
 debian/changelog
 debian/files
 debian/tvheadend
@@ -57,3 +58,5 @@ src/webui/static/intl
 Thumbs.db
 #Folder config file
 Desktop.ini
+#macOS files
+.DS_Store

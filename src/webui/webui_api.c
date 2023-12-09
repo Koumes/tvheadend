@@ -51,6 +51,10 @@ destroy_args:
   
   /* Convert error */
   if (r) {
+    if (r < 0) {
+      tvherror(LS_HTTP, "negative error code %d for url '%s'", r, hc->hc_url);
+      r = ENOSYS;
+    }
     switch (r) {
       case EPERM:
       case EACCES:
@@ -71,7 +75,7 @@ destroy_args:
     resp = htsmsg_create_map();
   if (resp) {
     htsmsg_json_serialize(resp, &hc->hc_reply, 0);
-    http_output_content(hc, "text/x-json; charset=UTF-8");
+    http_output_content(hc, "application/json; charset=UTF-8");
     htsmsg_destroy(resp);
   }
   

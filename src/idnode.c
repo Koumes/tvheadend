@@ -852,7 +852,7 @@ idnode_filter_init
             p->type == PT_TIME) {
           int64_t v = f->u.n.n;
           if (INTEXTRA_IS_SPLIT(p->intextra) && p->intextra != f->u.n.intsplit) {
-            v = (v / MIN(1, f->u.n.intsplit)) * p->intextra;
+            v = (v / MAX(1, f->u.n.intsplit)) * p->intextra;
             f->u.n.n = v;
           }
         }
@@ -1922,7 +1922,7 @@ idnode_notify_title_changed (void *in)
 {
   htsmsg_t *m = htsmsg_create_map();
   htsmsg_add_uuid(m, "uuid", &((idnode_t *)in)->in_uuid);
-  notify_by_msg("title", m, NOTIFY_REWRITE_TITLE);
+  notify_by_msg("title", m, 0, NOTIFY_REWRITE_TITLE);
   idnode_notify_changed(in);
 }
 

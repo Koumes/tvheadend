@@ -187,7 +187,7 @@ page_about(http_connection_t *hc, const char *remain, void *opaque)
 
   htsbuf_qprintf(hq, "<center class=\"about-tab\">\n\
 <div class=\"about-title\">HTS Tvheadend %s</div>\n\
-<p>&copy; 2006 - 2019 Andreas Öman, Jaroslav Kysela, Adam Sutton, et al.</p>\n\
+<p>&copy; 2006 - 2021 Andreas Öman, Jaroslav Kysela, Adam Sutton, et al.</p>\n\
 <p><img class=\"logobig\" src=\"static/img/logobig.png\"></p>\n\
 <p><a href=\"https://tvheadend.org\">https://tvheadend.org</a></p>\n",
     tvheadend_version);
@@ -198,8 +198,8 @@ page_about(http_connection_t *hc, const char *remain, void *opaque)
 FamFamFam</a>, "\
 "<a target=\"_blank\" href=\"https://www.google.com/get/noto/help/emoji/\">Google Noto Color Emoji</a> "\
 "<a target=\"_blank\" href=\"https://raw.githubusercontent.com/googlei18n/noto-emoji/master/LICENSE\">(Apache Licence v2.0)</a>.\n"\
-"<p>This product uses the TMDB API but is not endorsed or certified by <a target=\"_blank\" href=\"https://www.themoviedb.org\">TMDb</a> <img src=\"static/img/tmdb.png\"></p>"\
-"<p>TV information and images are provided by TheTVDB.com, but we are not endorsed or certified by TheTVDB.com or its affiliates. <a target=\"_blank\" href=\"https://thetvdb.com\">TheTVDB.com</a> <img src=\"static/img/tvdb.png\"></p>"\
+"<p>This product uses the TMDB API but is not endorsed or certified by <a target=\"_blank\" href=\"https://www.themoviedb.org\">TMDb</a> <img src=\"static/img/tmdb.png\" class=\"tmdb\"></p>"\
+"<p>TV information and images are provided by TheTVDB.com, but we are not endorsed or certified by TheTVDB.com or its affiliates. <a target=\"_blank\" href=\"https://thetvdb.com\">TheTVDB.com</a> <img src=\"static/img/tvdb.png\" class=\"tvdb\"></p>"\
 "</p>\n",
     tvh_gettext_lang(lang, N_("Based on software from")),
     tvh_gettext_lang(lang, N_("Icons from")));
@@ -227,7 +227,7 @@ FamFamFam</a>, "\
 <a href='https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=3Z87UEHP3WZK2'><img src='https://www.paypalobjects.com/en_US/GB/i/btn/btn_donateCC_LG.gif' alt='' /></a>\n\
 </center>\n",
    tvh_gettext_lang(lang, N_("If you'd like to support the project, please consider a donation.")),
-   tvh_gettext_lang(lang, N_("All proceeds are used to support server infrastructure and buy test equipment.")));
+   tvh_gettext_lang(lang, N_("All proceeds are used to support server infrastructure and hosting, and to buy test equipment.")));
 
   http_output_html(hc);
   return 0;

@@ -197,11 +197,13 @@ static void parse_xmltv_dd_progid
   (epggrab_module_t *mod, const char *s, char **uri, char **suri,
    epg_episode_num_t *epnum)
 {
-  char buf[128];
-  if (strlen(s) < 2) return;
+  const int s_len = strlen(s);
+  if (s_len < 2) return;
 
+  const int buf_size = s_len + strlen(mod->id) + 13;
+  char * buf = (char *) malloc( buf_size);
   /* Raw URI */
-  snprintf(buf, sizeof(buf)-1, "ddprogid://%s/%s", mod->id, s);
+  int e = snprintf( buf, buf_size, "ddprogid://%s/%s", mod->id, s);
 
   /* SH - series without episode id so ignore */
   if (strncmp("SH", s, 2))
@@ -211,14 +213,14 @@ static void parse_xmltv_dd_progid
 
   /* Episode */
   if (!strncmp("EP", s, 2)) {
-    int e = strlen(buf)-1;
-    while (e && buf[e] != '.') e--;
+    while (--e && buf[e] != '.') {}
     if (e) {
       buf[e] = '\0';
       *suri = strdup(buf);
       if (buf[e+1]) sscanf(&buf[e+1], "%hu", &(epnum->e_num));
     }
   }
+  free(buf);
 }
 
 /**
@@ -270,8 +272,10 @@ xmltv_parse_vid_quality
   if ((str = htsmsg_xml_get_cdata_str(m, "quality"))) {
     if (strstr(str, "HD")) {
       hd    = 1;
-    } else if (strstr(str, "UHD")) {
+    } else if (strstr(str, "FHD")) {
       hd    = 2;
+    } else if (strstr(str, "UHD")) {
+      hd    = 3;
     } else if (strstr(str, "480")) {
       lines  = 480;
       aspect = 150;
@@ -284,15 +288,15 @@ xmltv_parse_vid_quality
       aspect = 178;
     } else if (strstr(str, "1080")) {
       lines  = 1080;
-      hd     = 1;
+      hd     = 2;
       aspect = 178;
     } else if (strstr(str, "1716")) {
       lines  = 1716;
-      hd     = 2;
+      hd     = 3;
       aspect = 239;
     } else if (strstr(str, "2160")) {
       lines  = 2160;
-      hd     = 2;
+      hd     = 3;
       aspect = 178;
     }
   }
@@ -444,40 +448,86 @@ static int _xmltv_parse_star_rating
 static int _xmltv_parse_age_rating
   ( epg_broadcast_t *ebc, htsmsg_t *body, epg_changes_t *changes )
 {
-  uint8_t age;
-  htsmsg_t *rating, *tags;
+  uint8_t age = 0;
+  htsmsg_t *rating, *tags, *attrib;
   const char *s1;
 
   if (!ebc || !body) return 0;
 
   htsmsg_field_t *f;
-  HTSMSG_FOREACH(f, body) {
-    if (!strcmp(htsmsg_field_name(f), "rating") && (rating = htsmsg_get_map_by_field(f))) {
-      if ((tags  = htsmsg_get_map(rating, "tags"))) {
-        if ((s1 = htsmsg_xml_get_cdata_str(tags, "value"))) {
-          /* We map some common ratings since some movies only
-           * have one of these flags rather than an age rating.
-           */
-          if (!strcmp(s1, "TV-G") || !strcmp(s1, "U"))
-            age = 3;
-          else if (!strcmp(s1, "TV-Y7") || !strcmp(s1, "PG"))
-            age = 7;
-          else if (!strcmp(s1, "TV-14"))
-            age = 14;
-          else if (!strcmp(s1, "TV-MA"))
-            age = 17;
-          else
-            age = atoi(s1);
-          /* Since age is uint8_t it means some rating systems can
-           * underflow and become very large, for example CSA has age
-           * rating of -10.
-           */
-          if (age > 0 && age < 22)
-            return epg_broadcast_set_age_rating(ebc, age, changes);
+
+  const char        *rating_system;   //System attribute from the 'rating' tag : <rating system="ACMA">
+  ratinglabel_t     *rl = NULL;
+
+  //Clear the rating label.
+  //If the event is already in the EPG DB with another
+  //rating label, this will clear the existing rating lable
+  //prior to setting the new one -if- the new one
+  //just happens to be null.
+  ebc->rating_label = rl;
+
+  //Only look for rating labels if enabled.
+  if(epggrab_conf.epgdb_processparentallabels){
+    HTSMSG_FOREACH(f, body) {
+      if (!strcmp(htsmsg_field_name(f), "rating") && (rating = htsmsg_get_map_by_field(f))) {
+        //Look for a 'system' attribute of the 'rating' tag
+        rating_system = NULL;
+        if ((attrib = htsmsg_get_map(rating, "attrib"))){
+          rating_system = htsmsg_get_str(attrib, "system");
+        }//END get the atrtibutes for the rating tag.
+        //Look for sub-tags of the 'rating' tag
+        if ((tags  = htsmsg_get_map(rating, "tags"))) {
+          //Look the the 'value' tag containing the actual rating text
+          if ((s1 = htsmsg_xml_get_cdata_str(tags, "value"))) {
+            //tvherror(LS_RATINGLABELS, "XMLTV got system: '%s' / '%s'", rating_system, s1);
+
+            rl = ratinglabel_find_from_xmltv(rating_system, s1);
+
+            if(rl){
+              tvhtrace(LS_RATINGLABELS, "Found label: '%s' / '%s' / '%s' / '%d'", rl->rl_authority, rl->rl_label, rl->rl_country, rl->rl_age);
+              ebc->rating_label = rl;
+              if (rl->rl_display_age >= 0 && rl->rl_display_age < 22){
+                return epg_broadcast_set_age_rating(ebc, rl->rl_display_age, changes);
+              }//END age sanity test
+            }//END we matched a rating label
+          }//END we got a value to inspect
+        }//END get sub-tags of the rating tag.
+      }//END got the 'rating' tag.
+    }//END loop through each XML tag
+  }//END rating labels enabled
+  else
+  //Perform the existing XMLTV lookup
+  {
+    HTSMSG_FOREACH(f, body) {
+      if (!strcmp(htsmsg_field_name(f), "rating") && (rating = htsmsg_get_map_by_field(f))) {
+        if ((tags  = htsmsg_get_map(rating, "tags"))) {
+          if ((s1 = htsmsg_xml_get_cdata_str(tags, "value"))) {
+            /* We map some common ratings since some movies only
+             * have one of these flags rather than an age rating.
+             */
+            if (!strcmp(s1, "TV-G") || !strcmp(s1, "U"))
+              age = 3;
+            else if (!strcmp(s1, "TV-Y7") || !strcmp(s1, "PG"))
+              age = 7;
+            else if (!strcmp(s1, "TV-14"))
+              age = 14;
+            else if (!strcmp(s1, "TV-MA"))
+              age = 17;
+            else
+              age = atoi(s1);
+            /* Since age is uint8_t it means some rating systems can
+             * underflow and become very large, for example CSA has age
+             * rating of -10.
+             */
+            if (age > 0 && age < 22)
+              return epg_broadcast_set_age_rating(ebc, age, changes);
+          }
         }
       }
     }
   }
+
+
   return 0;
 }
 
@@ -585,13 +635,13 @@ _xmltv_parse_credits(htsmsg_t **out_credits, htsmsg_t *tags)
       char *s, *str2 = NULL, *saveptr = NULL;
       if (str == NULL) continue;
       if (strstr(str, "|") == 0) {
-      
+
         if (strlen(str) > 255) {
           str2 = strdup(str);
           str2[255] = '\0';
           str = str2;
         }
-      
+
         if (!credits_names) credits_names = string_list_create();
         string_list_insert(credits_names, str);
 

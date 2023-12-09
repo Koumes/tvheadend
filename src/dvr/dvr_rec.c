@@ -108,8 +108,9 @@ dvr_rec_subscribe(dvr_entry_t *de)
   }
 
   if (aa->aa_conn_limit || aa->aa_conn_limit_dvr) {
-    rec_count = dvr_usage_count(aa);
+    rec_count = dvr_usage_count(aa) - 1; /* substract self */
     net_count = aa->aa_conn_limit ? tcp_connection_count(aa) : 0;
+    assert(rec_count >= 0);
     /* the rule is: allow if one condition is OK */
     c1 = aa->aa_conn_limit ? rec_count + net_count >= aa->aa_conn_limit : -1;
     c2 = aa->aa_conn_limit_dvr ? rec_count >= aa->aa_conn_limit_dvr : -1;
@@ -1087,7 +1088,7 @@ pvr_generate_filename(dvr_entry_t *de, const streaming_start_t *ss)
       j--;
     s[j] = '\0';
     snprintf(path + l, sizeof(path) - l, "%s", s);
-    snprintf(path + l + j, sizeof(path) - l + j, "/%s", filename);
+    snprintf(path + l + j, sizeof(path) - (l + j), "/%s", filename);
   }
 
   /* Substitute time formatters */
@@ -1566,6 +1567,7 @@ dvr_thread_rec_start(dvr_entry_t **_de, streaming_start_t *ss,
     /* Persist entry so we save the filename details to avoid orphan
      * files if we crash before the programme completes recording.
      */
+    de->de_rating_label = NULL;  //Forget the rating label pointer and only rely on the saved values from here on.
     dvr_entry_changed(de);
     htsp_dvr_entry_update(de);
     if(code == 0) {

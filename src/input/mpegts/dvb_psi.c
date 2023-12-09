@@ -1355,7 +1355,7 @@ dvb_nit_mux
           priv == 0x3200 || priv == 0x3201) goto lcn;
       break;
     case 0x86:
-      if (priv == 0) goto lcn;
+      if (priv == 0 || priv == 0x1a0) goto lcn;
       break;
     case 0x88:
       if (priv == 0x28) {
@@ -2331,9 +2331,11 @@ psi_tables_install ( mpegts_input_t *mi, mpegts_mux_t *mm,
     psi_tables_atsc_t(mm);
     break;
   case DVB_SYS_DVBC_ANNEX_B:
+#if ENABLE_MPEGTS_DVB
     if (idnode_is_instance(&mm->mm_id, &dvb_mux_dvbc_class))
       psi_tables_dvb(mm);
     else
+#endif
       psi_tables_atsc_c(mm);
     break;
   case DVB_SYS_NONE:

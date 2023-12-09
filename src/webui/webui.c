@@ -24,6 +24,7 @@
 #include "config.h"
 #include "http.h"
 #include "tcp.h"
+#include "udp_stream.h"
 #include "webui.h"
 #include "dvr/dvr.h"
 #include "filebundle.h"
@@ -251,6 +252,8 @@ page_static_file(http_connection_t *hc, const char *_remain, void *opaque)
     postfix++;
     if(!strcmp(postfix, "js"))
       content = "text/javascript; charset=UTF-8";
+    else if(!strcmp(postfix, "html"))
+      content = "text/html; charset=UTF-8";
     else if(!strcmp(postfix, "css"))
       content = "text/css; charset=UTF-8";
     else if(!strcmp(postfix, "git"))
@@ -499,7 +502,8 @@ http_stream_run(http_connection_t *hc, profile_chain_t *prch,
  */
 static void
 http_m3u_playlist_add(htsbuf_queue_t *hq, const char *hostpath,
-                      const char *url_remain, const char *profile,
+                      const char *url_remain, const char *type,
+                      const char *profile,
                       const char *svcname, const char *chnum,
                       const char *logo, const char *epgid,
                       int urlauth, access_t *access)
@@ -508,6 +512,8 @@ http_m3u_playlist_add(htsbuf_queue_t *hq, const char *hostpath,
   if (urlauth == URLAUTH_TICKET)
     ticket = access_ticket_create(url_remain, access);
   htsbuf_append_str(hq, "#EXTINF:-1");
+  if (type)
+    htsbuf_qprintf(hq, " type=\"%s\"", type);
   if (!strempty(logo)) {
     int id = imagecache_get_id(logo);
     if (id) {
@@ -637,7 +643,7 @@ http_channel_playlist(http_connection_t *hc, int pltype, int urlauth, channel_t 
   if (pltype == PLAYLIST_M3U) {
 
     htsbuf_append_str(hq, "#EXTM3U\n");
-    http_m3u_playlist_add(hq, hostpath, buf, profile, name,
+    http_m3u_playlist_add(hq, hostpath, buf, NULL, profile, name,
                           channel_get_number_as_str(channel, chnum, sizeof(chnum)),
                           channel_get_icon(channel),
                           channel_get_uuid(channel, ubuf),
@@ -695,7 +701,7 @@ http_tag_playlist(http_connection_t *hc, int pltype, int urlauth, channel_tag_t 
     snprintf(buf, sizeof(buf), "/stream/channelid/%d", channel_get_id(ch));
     name = channel_get_name(ch, blank);
     if (pltype == PLAYLIST_M3U) {
-      http_m3u_playlist_add(hq, hostpath, buf, profile, name,
+      http_m3u_playlist_add(hq, hostpath, buf, NULL, profile, name,
                             channel_get_number_as_str(ch, chnum, sizeof(chnum)),
                             channel_get_icon(ch),
                             channel_get_uuid(ch, ubuf),
@@ -755,7 +761,8 @@ http_tag_list_playlist(http_connection_t *hc, int pltype, int urlauth)
     ct = ctlist[idx];
     if (pltype == PLAYLIST_M3U) {
       snprintf(buf, sizeof(buf), "/playlist/tagid/%d", idnode_get_short_uuid(&ct->ct_id));
-      http_m3u_playlist_add(hq, hostpath, buf, profile, ct->ct_name, NULL,
+      http_m3u_playlist_add(hq, hostpath, buf, "playlist",
+                            profile, ct->ct_name, NULL,
                             channel_tag_get_icon(ct),
                             NULL, urlauth, hc->hc_access);
     } else if (pltype == PLAYLIST_E2) {
@@ -825,7 +832,7 @@ http_channel_list_playlist(http_connection_t *hc, int pltype, int urlauth)
     snprintf(buf, sizeof(buf), "/stream/channelid/%d", channel_get_id(ch));
 
     if (pltype == PLAYLIST_M3U) {
-      http_m3u_playlist_add(hq, hostpath, buf, profile, name,
+      http_m3u_playlist_add(hq, hostpath, buf, NULL, profile, name,
                             channel_get_number_as_str(ch, chnum, sizeof(chnum)),
                             channel_get_icon(ch),
                             channel_get_uuid(ch, ubuf),
@@ -1178,6 +1185,117 @@ http_stream_service(http_connection_t *hc, service_t *service, int weight)
   return res;
 }
 
+static int
+udp_stream_service(http_connection_t *hc, service_t *service, int weight)
+{
+  th_subscription_t *s;
+  udp_connection_t *uc;
+  profile_t *pro;
+  muxer_hints_t *hints;
+  const char *str;
+  size_t qsize;
+  const char *address;
+  int port;
+  int res = HTTP_STATUS_SERVICE;
+  int flags, eflags = 0;
+  udp_stream_t *ustream;
+  size_t unlen;
+  char *stop_url;  
+  int pos;
+
+  if ((str = http_arg_get(&hc->hc_req_args, "port"))) {
+    port = atol(str);
+  } else {
+    tvhwarn(LS_WEBUI, "No port supplied in udp stream request");
+    return res;
+  }
+  if (!(address = http_arg_get(&hc->hc_req_args, "address"))) {
+    tvhwarn(LS_WEBUI, "No address supplied in udp stream request");
+    return res;
+  }
+
+  unlen = strlen(str) + strlen(address) + 2;
+  hc->hc_username = malloc(unlen);
+  snprintf(hc->hc_username, unlen, "%s:%s", address, str);
+
+  if (!(uc = udp_bind(LS_UDP, "udp_streamer",
+                       address, port, NULL,
+                       NULL, 1024, 188*7))) {
+    tvhwarn(LS_WEBUI, "Could not create and bind udp socket");
+    return res; 
+  }  
+
+  if (udp_connect (uc, "udp_streamer", address, port)) {
+    tvhwarn(LS_WEBUI, "Could not connect udp socket");
+    return res;
+  }  
+
+  if ((str = http_arg_get(&hc->hc_req_args, "descramble")))
+    if (strcmp(str, "0") == 0)
+      eflags |= SUBSCRIPTION_NODESCR;
+
+  if ((str = http_arg_get(&hc->hc_req_args, "emm")))
+    if (strcmp(str, "1") == 0)
+      eflags |= SUBSCRIPTION_EMM;
+
+  flags = SUBSCRIPTION_MPEGTS | eflags;
+  if ((eflags & SUBSCRIPTION_NODESCR) == 0)
+    flags |= SUBSCRIPTION_PACKET;
+  if(!(pro = profile_find_by_list(hc->hc_access->aa_profiles,
+                                  http_arg_get(&hc->hc_req_args, "profile"),
+                                  "service", flags))) {
+    udp_close(uc);
+    return HTTP_STATUS_NOT_ALLOWED;
+  }
+
+  stop_url = strdup(hc->hc_url_orig);
+  unlen = strlen(hc->hc_url_orig) - 1;
+  str = strstr(hc->hc_url_orig, "start");
+  pos = str - hc->hc_url_orig;
+  if (str && (pos > 0))
+    snprintf(&stop_url[pos], unlen-pos+1, "stop%s", &str[5]);
+
+  ustream = create_udp_stream(uc, stop_url);
+  free(stop_url);
+  if (!ustream) {
+    udp_close(uc);
+    return HTTP_STATUS_NOT_ALLOWED;    
+  }
+
+  if ((str = http_arg_get(&hc->hc_req_args, "qsize")))
+    qsize = atoll(str);
+  else
+    qsize = 1500000;
+
+  hints = muxer_hints_create(http_arg_get(&hc->hc_args, "User-Agent"));
+
+  profile_chain_init(&ustream->us_prch, pro, service, 1);
+  if (!profile_chain_open(&ustream->us_prch, NULL, hints, 0, qsize)) {
+
+    s = subscription_create_from_service(&ustream->us_prch, NULL, weight ?: 100, "UDP",
+                                         ustream->us_prch.prch_flags | SUBSCRIPTION_STREAMING |
+                                           eflags,
+                                         address,
+		                         http_username(hc),
+		                         http_arg_get(&hc->hc_args, "User-Agent"),
+                             NULL);
+    if(s) {
+      ustream->us_content_name = strdup(service->s_nicename);
+      ustream->us_subscript = s;
+      ustream->us_global_lock = &global_lock;
+      udp_stream_run(ustream);
+      http_output_html(hc);
+      close(hc->hc_fd);
+      return 0;
+    }
+  }
+
+  profile_chain_close(&ustream->us_prch);
+  udp_close(uc);
+  delete_udp_stream(ustream);
+  return res;
+}
+
 /**
  * Subscribe to a mux for grabbing a raw dump
  *
@@ -1321,17 +1439,107 @@ http_stream_channel(http_connection_t *hc, channel_t *ch, int weight)
   return res;
 }
 
-
-/**
- * Handle the http request. http://tvheadend/stream/channelid/<chid>
- *                          http://tvheadend/stream/channel/<uuid>
- *                          http://tvheadend/stream/channelnumber/<channelnumber>
- *                          http://tvheadend/stream/channelname/<channelname>
- *                          http://tvheadend/stream/service/<servicename>
- *                          http://tvheadend/stream/mux/<muxid>
- */
 static int
-http_stream(http_connection_t *hc, const char *remain, void *opaque)
+udp_stream_channel(http_connection_t *hc, channel_t *ch, int weight)
+{
+  th_subscription_t *s;
+  udp_connection_t *uc;
+  profile_t *pro;
+   muxer_hints_t *hints;
+  const char *str;
+  size_t qsize;
+  const char *address;
+  int port;
+  int res = HTTP_STATUS_SERVICE;
+  udp_stream_t *ustream;
+  size_t unlen;
+  char *stop_url; 
+  int pos;
+
+  if ((str = http_arg_get(&hc->hc_req_args, "port"))) {
+    port = atol(str);
+  } else {
+    tvhwarn(LS_WEBUI, "No port supplied in udp stream request");
+    return res;
+  }
+  if (!(address = http_arg_get(&hc->hc_req_args, "address"))) {
+    tvhwarn(LS_WEBUI, "No address supplied in udp stream request");
+    return res;
+  }
+
+  unlen = strlen(str) + strlen(address) + 2;
+  hc->hc_username = malloc(unlen);
+  snprintf(hc->hc_username, unlen, "%s:%s", address, str);
+
+  if (!(uc = udp_bind(LS_UDP, "udp_streamer",
+                       address, port, NULL,
+                       NULL, 1024, 188*7))) {
+    tvhwarn(LS_WEBUI, "Could not create and bind udp socket");
+    return res; 
+  }  
+
+  if (udp_connect (uc, "udp_streamer", address, port)) {
+    tvhwarn(LS_WEBUI, "Could not connect udp socket");
+    return res;
+  }  
+
+  if(!(pro = profile_find_by_list(hc->hc_access->aa_profiles,
+                                  http_arg_get(&hc->hc_req_args, "profile"),
+                                  "channel", 
+                                  SUBSCRIPTION_PACKET | SUBSCRIPTION_MPEGTS))) {
+    udp_close(uc);
+    return HTTP_STATUS_NOT_ALLOWED;
+  }  
+
+  stop_url = strdup(hc->hc_url_orig);
+  unlen = strlen(hc->hc_url_orig) - 1;
+  str = strstr(hc->hc_url_orig, "start");
+  pos = str - hc->hc_url_orig;
+  if (str && (pos > 0))
+    snprintf(&stop_url[pos], unlen-pos+1, "stop%s", &str[5]);
+
+  ustream = create_udp_stream(uc, stop_url);
+  free(stop_url);
+  if (!ustream) {
+    udp_close(uc);
+    return HTTP_STATUS_NOT_ALLOWED;    
+  }
+
+  if ((str = http_arg_get(&hc->hc_req_args, "qsize")))
+    qsize = atoll(str);
+  else
+    qsize = 1500000;
+
+ hints = muxer_hints_create(http_arg_get(&hc->hc_args, "User-Agent"));
+
+  profile_chain_init(&ustream->us_prch, pro, ch, 1);
+  if (!profile_chain_open(&ustream->us_prch, NULL, hints, 0, qsize)) {
+
+    s = subscription_create_from_channel(&ustream->us_prch, NULL, weight ?: 100, "UDP",
+                                         ustream->us_prch.prch_flags | SUBSCRIPTION_STREAMING,
+                                         address,
+		                         http_username(hc),
+		                         http_arg_get(&hc->hc_args, "User-Agent"),
+                             NULL);
+    if(s) {
+      ustream->us_content_name = strdup(channel_get_name(ch, channel_blank_name));
+      ustream->us_subscript = s;
+      ustream->us_global_lock = &global_lock;
+      udp_stream_run(ustream);
+      http_output_html(hc);
+      close(hc->hc_fd);
+      return 0;
+    }
+  }
+
+  profile_chain_close(&ustream->us_prch);
+  udp_close(uc);
+  delete_udp_stream(ustream);
+  return res;
+}
+
+static int
+do_stream(http_connection_t *hc, const char *remain, void *opaque, int isUdp)
 {
   char *components[2];
   channel_t *ch = NULL;
@@ -1375,9 +1583,9 @@ http_stream(http_connection_t *hc, const char *remain, void *opaque)
   }
 
   if(ch != NULL) {
-    r = http_stream_channel(hc, ch, weight);
+    r = isUdp ? udp_stream_channel(hc, ch, weight) : http_stream_channel(hc, ch, weight);
   } else if(service != NULL) {
-    r = http_stream_service(hc, service, weight);
+    r = isUdp ? udp_stream_service(hc, service, weight) : http_stream_service(hc, service, weight);
 #if ENABLE_MPEGTS
   } else if(mm != NULL) {
     r = http_stream_mux(hc, mm, weight);
@@ -1388,6 +1596,66 @@ http_stream(http_connection_t *hc, const char *remain, void *opaque)
 
   tvh_mutex_unlock(&global_lock);
   return r;
+}
+
+/**
+ * Handle the http request. http://tvheadend/stream/channelid/<chid>
+ *                          http://tvheadend/stream/channel/<uuid>
+ *                          http://tvheadend/stream/channelnumber/<channelnumber>
+ *                          http://tvheadend/stream/channelname/<channelname>
+ *                          http://tvheadend/stream/service/<servicename>
+ *                          http://tvheadend/stream/mux/<muxid>
+ */
+static int
+http_stream(http_connection_t *hc, const char *remain, void *opaque) {
+  return do_stream(hc, remain, opaque, 0);
+}
+
+/**
+ * Handle the http request. http://tvheadend/udpstream/start/channelid/<chid>?address=<destaddr>&port=<udpport>
+ *                          http://tvheadend/udpstream/start/channel/<uuid>?address=<destaddr>&port=<udpport>
+ *                          http://tvheadend/udpstream/start/channelnumber/<channelnumber>?address=<destaddr>&port=<udpport>
+ *                          http://tvheadend/udpstream/start/channelname/<channelname>?address=<destaddr>&port=<udpport>
+ *                          http://tvheadend/udpstream/start/service/<servicename>?address=<destaddr>&port=<udpport>
+ */
+static int
+start_udp_stream(http_connection_t *hc, const char *remain, void *opaque) {
+  return do_stream(hc, remain, opaque, 1);
+}
+
+/**
+ * Handle the http request. http://tvheadend/udpstream/stop/channelid/<chid>?address=<destaddr>&port=<udpport>
+ *                          http://tvheadend/udpstream/stop/channel/<uuid>?address=<destaddr>&port=<udpport>
+ *                          http://tvheadend/udpstream/stop/channelnumber/<channelnumber>?address=<destaddr>&port=<udpport>
+ *                          http://tvheadend/udpstream/stop/channelname/<channelname>?address=<destaddr>&port=<udpport>
+ *                          http://tvheadend/udpstream/stop/service/<servicename>?address=<destaddr>&port=<udpport>
+ */
+static int
+stop_udp_stream(http_connection_t *hc, const char *remain, void *opaque) {
+  char *components[2];
+  udp_stream_t *us;
+
+  hc->hc_keep_alive = 0;
+
+  if(remain == NULL)
+    return HTTP_STATUS_BAD_REQUEST;
+
+  if(http_tokenize((char *)remain, components, 2, '/') != 2)
+    return HTTP_STATUS_BAD_REQUEST;
+
+  http_deescape(components[1]);
+
+  us = find_udp_stream_by_hint(hc->hc_url_orig);
+  if (us) {
+    tvhdebug(LS_WEBUI, "Stop UDP stream %s", us->us_udp_url);
+    udp_stream_shutdown(us);
+  } else {
+    tvhwarn(LS_WEBUI,  "UDP stream not found (stop request %s)", hc->hc_url_orig);
+  }
+
+  http_output_html(hc);
+  close(hc->hc_fd);
+  return 0;
 }
 
 /**
@@ -2145,6 +2413,8 @@ webui_init(int xspf)
   http_path_add("/state", NULL, page_statedump, ACCESS_ADMIN);
 
   http_path_add("/stream",  NULL, http_stream,  ACCESS_ANONYMOUS);
+  http_path_add("/udpstream/start",  NULL, start_udp_stream,  ACCESS_ANONYMOUS);
+  http_path_add("/udpstream/stop",  NULL, stop_udp_stream,  ACCESS_ANONYMOUS);
 
   http_path_add("/imagecache", NULL, page_imagecache, ACCESS_ANONYMOUS);
 

@@ -26,6 +26,7 @@
 #include "dvr/dvr.h"
 #include "lang_codes.h"
 #include "string_list.h"
+#include "epggrab.h"  //Needed to be able to test for epggrab_conf.epgdb_processparentallabels
 
 static htsmsg_t *
 api_epg_get_list ( const char *s )
@@ -79,7 +80,7 @@ static htsmsg_t *
 api_epg_entry ( epg_broadcast_t *eb, const char *lang, const access_t *perm, const char **blank )
 {
   const char *s, *blank2 = NULL;
-  char buf[32];
+  char buf[128];
   channel_t *ch = eb->channel;
   htsmsg_t *m, *m2;
   epg_episode_num_t epnum;
@@ -102,10 +103,10 @@ api_epg_entry ( epg_broadcast_t *eb, const char *lang, const access_t *perm, con
     htsmsg_add_str(m, "episodeUri", eb->episodelink->uri);
   if (eb->serieslink)
     htsmsg_add_str(m, "serieslinkUri", eb->serieslink->uri);
-  
+
   /* Channel Info */
   api_epg_add_channel(m, ch, *blank);
-  
+
   /* Time */
   htsmsg_add_s64(m, "start", eb->start);
   htsmsg_add_s64(m, "stop", eb->stop);
@@ -187,6 +188,24 @@ api_epg_entry ( epg_broadcast_t *eb, const char *lang, const access_t *perm, con
   if (eb->age_rating)
     htsmsg_add_u32(m, "ageRating", eb->age_rating);
 
+  if(epggrab_conf.epgdb_processparentallabels)
+  {
+    if (eb->rating_label)
+      {
+        if(eb->rating_label->rl_display_label){
+          htsmsg_add_str(m, "ratingLabel", eb->rating_label->rl_display_label);
+        }
+        if(eb->rating_label->rl_icon){
+          s = eb->rating_label->rl_icon;
+          if (!strempty(s)) {
+            s = imagecache_get_propstr(s, buf, sizeof(buf));
+            if (s)
+              htsmsg_add_str(m, "ratingLabelIcon", s);
+          }//END we got an imagecache
+        }//END rating label icon is not null
+      }//END rating label is not null
+  }//END parental labels enabled.
+
   if (eb->first_aired)
     htsmsg_add_s64(m, "first_aired", eb->first_aired);
   if (eb->copyright_year)
@@ -220,7 +239,7 @@ api_epg_entry ( epg_broadcast_t *eb, const char *lang, const access_t *perm, con
   /* Next event */
   if ((eb = epg_broadcast_get_next(eb)))
     htsmsg_add_u32(m, "nextEventId", eb->id);
-  
+
   return m;
 }
 
@@ -284,7 +303,7 @@ api_epg_filter_add_num
   else if (!strcmp(k, "episode"))
     api_epg_filter_set_num(&eq->episode, v1, v2, comp);
   else if (!strcmp(k, "stars"))
-    api_epg_filter_set_num(&eq->episode, v1, v2, comp);
+    api_epg_filter_set_num(&eq->stars, v1, v2, comp);
   else if (!strcmp(k, "age"))
     api_epg_filter_set_num(&eq->age, v1, v2, comp);
 }
@@ -440,6 +459,7 @@ api_epg_grid
                 HTSMSG_FOREACH(f3, z)
                   if (!htsmsg_field_get_s64(f3, &v))
                     eq.genre[eq.genre_count++] = v;
+                htsmsg_destroy(z);
               }
             } else {
               if (!htsmsg_field_get_s64(f2, &v)) {
@@ -564,7 +584,8 @@ api_epg_episode_sorted(const struct epg_set *set,
     }
   }
 
-  tvh_qsort_r(bcast_entries, num_entries, sizeof(bcast_entry_t), api_epg_sort_by_time_t, 0);
+  if(bcast_entries != NULL)
+    tvh_qsort_r(bcast_entries, num_entries, sizeof(bcast_entry_t), api_epg_sort_by_time_t, 0);
 
   for (i=0; i<num_entries; ++i) {
     htsmsg_t *m = bcast_entries[i].m;
@@ -597,12 +618,14 @@ api_epg_alternative
   ( access_t *perm, void *opaque, const char *op, htsmsg_t *args, htsmsg_t **resp )
 {
   uint32_t id, entries = 0;
-  htsmsg_t *l = htsmsg_create_list();
+  htsmsg_t *l;
   epg_broadcast_t *e;
   char *lang;
 
   if (htsmsg_get_u32(args, "eventId", &id))
-    return -EINVAL;
+    return EINVAL;
+
+  l = htsmsg_create_list();
 
   /* Main Job */
   lang = access_get_lang(perm, htsmsg_get_str(args, "lang"));
@@ -626,14 +649,16 @@ api_epg_related
   ( access_t *perm, void *opaque, const char *op, htsmsg_t *args, htsmsg_t **resp )
 {
   uint32_t id, entries = 0;
-  htsmsg_t *l = htsmsg_create_list();
+  htsmsg_t *l;
   epg_broadcast_t *e;
   char *lang, *title_esc, *title_anchor;
   epg_set_t *serieslink = NULL;
   const char *title = NULL;
-  
+
   if (htsmsg_get_u32(args, "eventId", &id))
-    return -EINVAL;
+    return EINVAL;
+
+  l = htsmsg_create_list();
 
   /* Main Job */
   lang = access_get_lang(perm, htsmsg_get_str(args, "lang"));
@@ -662,6 +687,7 @@ api_epg_related
       /* Have to unlock here since grid will re-lock */
       tvh_mutex_unlock(&global_lock);
       free(lang);
+      htsmsg_destroy(l);
       /* And let the grid do the query for us */
       return api_epg_grid(perm, opaque, op, args, resp);
     }
@@ -684,17 +710,19 @@ api_epg_load
   ( access_t *perm, void *opaque, const char *op, htsmsg_t *args, htsmsg_t **resp )
 {
   uint32_t id = 0, entries = 0;
-  htsmsg_t *l = htsmsg_create_list(), *ids = NULL, *m;
+  htsmsg_t *l, *ids = NULL, *m;
   htsmsg_field_t *f;
   epg_broadcast_t *e;
   const char *blank = NULL;
   char *lang;
 
   if (!(f = htsmsg_field_find(args, "eventId")))
-    return -EINVAL;
+    return EINVAL;
   if (!(ids = htsmsg_field_get_list(f)))
     if (htsmsg_field_get_u32(f, &id))
-      return -EINVAL;
+      return EINVAL;
+
+  l = htsmsg_create_list();
 
   /* Main Job */
   tvh_mutex_lock(&global_lock);
